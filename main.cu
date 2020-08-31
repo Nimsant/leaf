@@ -2,8 +2,9 @@
 #include <stdio.h>
 #include "err.h"
 
+const int D = 3;
 const int NQ = 19, Nq = NQ-1; 
-const int Nx = 15, Ny = 5, Nz = 5; 
+const int Nx = 5, Ny = 1, Nz = 1; 
 const int N_containers = Nx*Ny*Nz;
 const int N_cubes = 8; 
 const int Nc = 8; 
@@ -40,12 +41,40 @@ struct Tree{
   // children of node [inode] are at (2**D)*inode+1+ range(2**D)
   // children of 0 are 1,2,3,..8; chidren of 1 are 9,10...
   unsigned short nodes[nodes_in_tree];  //each number is less than Nleaves
-  unsigned short Nleaves; //less than the number of nodes in the tree
+  unsigned int Nleaves; //less than the number of nodes in the tree
   unsigned int LeafContainer; //less than MaxStorage
   __device__ void init() ;
   __device__ void add_leaf(int inode, Cube cube) ;
 };
 
+__device__ unsigned int get_parent(unsigned int inode = 0) {
+  int I = (inode-1)%8; 
+  int II = inode - I;
+  return (II-1)/8;
+}
+
+__device__ uint3 morton_pos(unsigned int _im = 0) {
+  uint3 pos3 {0,0,0}; 
+  unsigned int inode = _im; 
+  unsigned int bitpos = 0;
+  for (int s=0; s<MaxLevel; s++) {
+    if (inode>0){
+      int x = ((inode-1)%8)%2;
+      int y = ((inode-1)%8)/2%2;
+      int z = ((inode-1)%8)/2/2;
+      pos3.x = pos3.x|x<<(bitpos);
+      pos3.y = pos3.y|y<<(bitpos);
+      pos3.z = pos3.z|z<<(bitpos);
+      bitpos++;
+      inode = get_parent(inode);
+    } else {
+      pos3.x = pos3.x<<1;
+      pos3.y = pos3.y<<1;
+      pos3.z = pos3.z<<1;
+    }
+  }
+  return pos3; 
+}
 struct pars {
   Container* leaf_storage;
   int* free_storage;
@@ -55,7 +84,7 @@ struct pars {
   __device__  void set_free(int i) { // ----------------- not  tested
     if (*next_free>0) {
       int spot = atomicSub(next_free,1);
-      free_storage[*next_free] = i;
+      free_storage[spot-1] = i;
       } else {
       printf("set_free ERROR\n");
       }
@@ -63,7 +92,6 @@ struct pars {
 };
 
 __constant__ pars par;
-
 
 __device__ void Tree::init () {
   LeafContainer = no_container;
@@ -82,6 +110,11 @@ __device__ void Tree::add_leaf(int inode, Cube cube) {
 
 __device__ Cube & pars::leaf_spot (int leaf_container, int num_leaf) {
    if (num_leaf >= N_cubes) {
+     if (leaf_storage[leaf_container].next != no_container) {
+       printf("interesting");
+       int spot = atomicAdd(next_free,1);
+       leaf_storage[leaf_container].next = spot;
+       };
      int next_container = leaf_storage[leaf_container].next;
      return leaf_spot (next_container, num_leaf - N_cubes); 
    } else {
@@ -125,6 +158,9 @@ const int threads2init = Nc*Nc*Nc; //512
 
 __global__ void init_free() {
   int i_cntn = blockIdx.x + gridDim.x*(blockIdx.y + gridDim.y*blockIdx.z);
+  for (int i=i_cntn; i<MaxStorage; i+=Nx*Ny*Nz){
+    par.leaf_storage[i].next = no_container;
+    }
   for (int i=i_cntn+Nx*Ny*Nz; i<MaxStorage; i+=Nx*Ny*Nz){
     par.free_storage[i] = i;
     }
@@ -141,38 +177,42 @@ __global__ void init() {
   par.leaf_spot(tree.LeafContainer,root_leaf_num).cell[threadIdx.x].reset(blockIdx.x*Nc+threadIdx.x%Nc);
 }
 
-__device__ unsigned int get_parent(unsigned  int inode = 0) {
-  int I = (inode-1)%8; 
-  int II = inode - I;
-  return (II-1)/8;
-}
 
-__device__ uint3 morton_pos(unsigned int _im = 0) {
-  uint3 pos3 {0,0,0}; 
-  unsigned int inode = _im; 
-  unsigned int bitpos = 0;
-  for (int s=0; s<MaxLevel; s++) {
-    if (inode>0){
-      int x = ((inode-1)%8)&1;
-      pos3.x = pos3.x|x<<(bitpos);
-      bitpos++;
-      inode = get_parent(inode);
-    } else {
-      pos3.x = pos3.x<<1;
-    }
-    printf("s,inode,x %i %i %i\n",s,inode,pos3.x);
-  }
-  return pos3; 
-}
+__shared__ Tree clone;
 
 __global__ void refine() {
   int tree_num = blockIdx.x + gridDim.x*(blockIdx.y + gridDim.y*blockIdx.z);
   Tree & tree = par.trees[tree_num];
-  Cube cube; for (int ic=0;ic<Nc*Nc*Nc;ic++) cube.cell[ic].reset(8);
-  for (int inode = 0; inode < 1+8; inode++) {
-    //if (tree.nodes[inode]!=null_node) tree.add_leaf(cube);
+  clone.Nleaves = 0; 
+  for (int inode = 0, ileaf=0; inode < nodes_in_tree, ileaf<tree.Nleaves; inode++,ileaf++) {
+    if (tree.nodes[inode]!=null_node) {
+      //copy same node
+      atomicAdd(&clone.Nleaves,1); 
+      int spot = atomicAdd(par.next_free,1);
+      printf("take %i\n", spot);
+      clone.LeafContainer = par.free_storage[spot];
+      //make children
+      /*
+      for (int ichild=0; ichild<8; ichild++) {
+        int ichild_node = (1<<D)*inode + 1 + ichild;
+        if (morton_pos(ichild_node).x>=8) {
+          printf("tree %4i node %i i_leaf %i ichild_node %i pos.x %i --%i -- %i \n",
+              tree_num,  inode,    ileaf,   ichild_node, morton_pos(ichild_node).x,
+              tree.nodes[ichild_node], 
+              clone.LeafContainer);
+        }
+      }
+      //tree.add_leaf(cube);
+      */
+    }
   }
-
+  // Free previous place
+  //grid_group g = this_grid();
+  //g.sync();
+  printf("free %i Nleaves %i\n", tree.LeafContainer, clone.Nleaves);
+  par.set_free(tree.LeafContainer);
+  // Update tree 
+  tree = clone;
 }
 
 __global__ void output(int it) {
@@ -189,15 +229,20 @@ __global__ void output(int it) {
 
 __global__ void debug() {
   for (int i=0; i<MaxStorage; i++){
-   // printf("%i - %i\n", i, par.free_storage[i]); 
+    printf("%3i - %3i / %4i\n", i, par.free_storage[i], Nx*Ny*Nz ); 
+    }
+  for (int i=0; i<Nx*Ny*Nz; i++){
+    Tree & tree = par.trees[i];
+    printf("tree %i container %i next %i \n", i, tree.LeafContainer, par.leaf_storage[tree.LeafContainer].next);
     }
   //printf("next_free %i \n", parnext_free); 
   //int i = nodes_in_tree-1;
   //int i = 584;
   for (int i=0; i<nodes_in_tree; i++) {
-    printf("parent of %i  is %i \n", i, get_parent(i)); 
-    printf("pos of %i  is %i/%i\n", i, morton_pos(i).x, 1<<MaxLevel); 
+    //printf("parent of %i  is %i \n", i, get_parent(i)); 
+    //printf("pos of %i  is %i %i %i /%i\n", i, morton_pos(i).x, morton_pos(i).y, morton_pos(i).z, 1<<MaxLevel); 
     }
+
 }
 
 int step() {
@@ -217,8 +262,9 @@ int main(int argc, char** argv) {
     PRINT_LAST_ERROR();
       for(int i=0; i<1; i++) {
         debug<<<1,1>>>();
-        //refine<<<blocks2init, 1>>>();
-        //output<<<blocks2init, threads2init>>>(i);
+        refine<<<blocks2init, 1>>>();
+        debug<<<1,1>>>();
+        output<<<blocks2init, threads2init>>>(i);
         int Ntorres=step(); 
       }
   } catch(...) {

@@ -3,13 +3,13 @@ NVCC := nvcc -ccbin $(GCC)
 PY2  := python
 PY3  := python3.7 
 
-NVCCFLAGS   := -Xptxas="-v"
+NVCCFLAGS   := -Xptxas="-v" 
 CCFLAGS     := -O3 -std=c++11
 NVCCLDFLAGS :=
 LDFLAGS     :=
 
 EXTRA_NVCCFLAGS   ?=
-EXTRA_NVCCLDFLAGS ?=
+EXTRA_NVCCLDFLAGS ?= 
 EXTRA_LDFLAGS     ?=
 EXTRA_CCFLAGS     ?= -std=c++0x
 
@@ -74,7 +74,7 @@ ifeq ($(where),Zu)
   NVCC := nvcc -ccbin $(GCC)
 endif
 
-NAME = start_cuda
+NAME = leaf
 
 all: $(NAME)
 
@@ -90,5 +90,5 @@ run: $(NAME)
 	$(EXEC) vglrun ./$(NAME) --zoom "$(zoom) $(zoom) $(zoom)" --Dmesh 0.5
 
 clean:
-	$(EXEC) rm -f (obj_files) main 
+	$(EXEC) rm -f $(obj_files) $(NAME)
 
